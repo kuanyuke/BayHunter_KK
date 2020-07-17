@@ -8,7 +8,8 @@
 
 import numpy as np
 from BayHunter.surfdisp96_ext import surfdisp96
-
+import sys
+sys.stdout.flush()
 
 class SurfDisp(object):
     """Forward modeling of dispersion curves based on surf96 (Rob Herrmann).
@@ -75,13 +76,36 @@ forward modeling plugin with target.update_plugin(MyForwardClass()).\n \
 
         vsm = np.zeros(100)
         vsm[:nlayer] = vs
-
+                
         rhom = np.zeros(100)
         rhom[:nlayer] = rho
 
         return thkm, vpm, vsm, rhom
+    
+    def get_ani_vs(self, nlayer, iwave, vs, ra):
+        
+        if type(ra) == np.float or type(ra) == np.int:
+            if iwave == 2:
+                vsv = vs - 0.5 * ra * 0.01 * vs
+                return vsv
+            elif iwave == 1: #Love wave 
+                vsh = vs + 0.5 * ra * 0.01 * vs
+                return vsh
+        elif iwave == 2: #Rayleigh wave
+            vsv = np.zeros(nlayer)
+            for i in range(nlayer):
+                vsv[i] = vs[i] - 0.5 * ra[i] * 0.01 * vs[i]
+                #vs = 2 * vs / (1 + r)                
+            return vsv
+        elif iwave == 1: #Love wave 
+            vsh = np.zeros(nlayer)
+            for i in range(nlayer):
+                vsh[i] = vs[i] + 0.5 * ra[i] * 0.01 * vs[i]
+                #vs = 2 * vs / (1 + 1/r)
+            return vsh
 
-    def run_model(self, h, vp, vs, rho, **params):
+
+    def run_model(self, h, vp, vs, ra, rho, **params):
         """ The forward model will be run with the parameters below.
 
         thkm, vpm, vsm, rhom: model for dispersion calculation
@@ -96,11 +120,17 @@ forward modeling plugin with target.update_plugin(MyForwardClass()).\n \
 
         """
         nlayer = len(h)
+        iwave = self.wavetype
+        
+        if ra is None:
+            vs = vs
+        else:
+            vs = self.get_ani_vs(nlayer, iwave, vs, ra)
+           
         h, vp, vs, rho = self.get_modelvectors(h, vp, vs, rho)
-
         iflsph = self.modelparams['flsph']
         mode = self.modelparams['mode']
-        iwave = self.wavetype
+        
         igr = self.veltype
 
         if self.kmax > 60:
@@ -111,7 +141,8 @@ forward modeling plugin with target.update_plugin(MyForwardClass()).\n \
             pers = np.zeros(60)
             kmax = self.kmax
             pers[:kmax] = self.obsx
-
+            
+            
         dispvel = np.zeros(60)  # result
         error = surfdisp96(h, vp, vs, rho, nlayer, iflsph, iwave,
                            mode, igr, kmax, pers, dispvel)

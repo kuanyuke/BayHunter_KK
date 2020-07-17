@@ -8,7 +8,10 @@
 
 import numpy as np
 import logging
-from BayHunter import Targets
+#from BayHunter import Targets
+
+import Targets
+
 
 logger = logging.getLogger()
 
@@ -22,13 +25,21 @@ class SynthObs():
     You find also a method to compute the expected likelihood, for a given
     observed and modeled data set. This value can be feeded into BayWatch."""
     @staticmethod
-    def return_swddata(h, vs, vpvs=1.73, pars=dict(), x=None):
+    def return_swddata(h, vs, vpvs=1.73, ra=None, pars=dict(), x=None):
         """Return dictionary of forward modeled data based on Surf96."""
         if x is None:
             x = np.linspace(1, 40, 20)
+            
+        if ra is None:
+            ra = 0
+        elif type(ra) == np.float or type(ra) == np.int:
+            ra = ra
+        else:
+            ra = np.array(ra)
 
         h = np.array(h)
         vs = np.array(vs)
+        
 
         mode = pars.get('mode', 1)  # fundamental mode
 
@@ -48,7 +59,7 @@ class SynthObs():
         data = {}
         for i, target in enumerate(targets):
             xmod, ymod = target.moddata.plugin.run_model(
-                h=h, vp=vp, vs=vs, rho=rho)
+                h=h, vp=vp, vs=vs, ra=ra, rho=rho)
             data[target.ref] = np.array([xmod, ymod])
         logger.info('Compute SWD for %d periods, with model vp/vs %.2f.'
                     % (x.size, vpvs))
@@ -116,20 +127,40 @@ class SynthObs():
             logger.info('Data file saved: %s' % outfile % ref)
 
     @staticmethod
-    def save_model(h, vs, vpvs=1.73, outfile=None):
+    def save_model(h, vs, vpvs=1.73, ra=None, outfile=None):
         """Save input model as ASCII file."""
+        layers = len(vs)
+        vsh = np.zeros(layers)
+        vsv = np.zeros(layers)
         h = np.array(h)
         vs = np.array(vs)
 
+        
         vp = vs * vpvs
         rho = vp * 0.32 + 0.77
+        
+
+        if ra is None:
+            vsv = vs
+            vsh = vs
+        elif type(ra) == np.float or type(ra) == np.int:
+            vsv = vs - 0.5 * ra * 0.01 * vs
+            vsh = vs + 0.5 * ra * 0.01 * vs
+        else:
+            ra = np.array(ra)
+            for i in range(layers):
+                vsv[i] = vs[i] - 0.5 * ra[i] * 0.01 * vs[i]
+                vsh[i] = vs[i] + 0.5 * ra[i] * 0.01 * vs[i]
+                
+                #vsv = 2 * vs / (1 + r)
+                #vsh = 2 * vs / (1 + 1/r)
 
         if outfile is None:
             outfile = 'syn_mod.dat'
 
         x = np.arange(10)
         target = Targets.PReceiverFunction(x=x, y=None)
-        target.moddata.plugin.write_startmodel(h, vp, vs, rho, outfile)
+        target.moddata.plugin.write_startmodel(h, vp, vsv, vsh, rho, outfile)
         logger.info('Model file saved: %s' % outfile)
 
     @staticmethod

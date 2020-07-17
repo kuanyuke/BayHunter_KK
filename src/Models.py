@@ -9,6 +9,8 @@
 import numpy as np
 import copy
 
+import sys
+sys.stdout.flush()
 
 class Model(object):
     """Handle interpolating methods for a single model vector."""
@@ -35,9 +37,24 @@ class Model(object):
             ind_m[0] == np.int
             vp[ind_m[0]:] = vs[ind_m[0]:] * mantle[1]
         return vp
+    
+    @staticmethod 
+    def get_vsv_vsh(vs, ra, vs_type=None):
+        layers = len(vs)
+        ra = np.array(ra)
+        if vs_type == 'vsv':
+            vsv = np.zeros(layers)   
+            for i in range(layers):
+                vsv[i] = vs[i] - 0.5 * ra[i] * 0.01 * vs[i]
+            return vsv
+        elif vs_type == 'vsh':        
+            vsh = np.zeros(layers)
+            for i in range(layers):
+                vsh[i] = vs[i] + 0.5 * ra[i] * 0.01 * vs[i]
+            return vsh 
 
     @staticmethod
-    def get_vp_vs_h(model, vpvs=1.73, mantle=None):
+    def get_vp_vs_h(model, vpvs=1.73,  mantle=None):
         """Return vp, vs and h from a input model [vs, z_vnoi]"""
         n, vs, z_vnoi = Model.split_modelparams(model)
         # discontinuities:
@@ -49,6 +66,7 @@ class Model(object):
             vp = Model.get_vp(vs, vpvs, mantle)
         else:
             vp = vs * vpvs
+
         return vp, vs, h
 
     @staticmethod
@@ -69,7 +87,7 @@ class Model(object):
         return vp_step, vs_step, dep_step
 
     @staticmethod
-    def get_stepmodel_from_h(h, vs, vpvs=1.73, dep=None, vp=None, mantle=None):
+    def get_stepmodel_from_h(h, vs, vpvs=1.73, dep=None, vp=None, ra=None, mantle=None):
         """Return a steplike model from input model."""
         # insert steps into velocity model
         if dep is None:
@@ -80,27 +98,62 @@ class Model(object):
                 vp = Model.get_vp(vs, vpvs, mantle)
             else:
                 vp = vs * vpvs
-
+                
+        if ra is None:
+            vsv = vs
+            vsh = vs
+        else:
+            layers = len(vs)          
+            vsh = np.zeros(layers)
+            vsv = np.zeros(layers)
+            
+            ra = np.array(ra)
+            for i in range(layers):
+                vsv[i] = vs[i] - 0.5 * ra[i] * 0.01 * vs[i]
+                vsh[i] = vs[i] + 0.5 * ra[i] * 0.01 * vs[i]
+            
+            
         dep = np.concatenate([(d, d) for d in dep])
         dep_step = np.concatenate([[0], dep[:-1]])
         vp_step = np.concatenate([(v, v) for v in vp])
-        vs_step = np.concatenate([(v, v) for v in vs])
-
+        vsv_step = np.concatenate([(v, v) for v in vsv])
+        vsh_step = np.concatenate([(v, v) for v in vsh])
+        
         dep_step[-1] = dep_step[-1] * 2.5  # half space
 
-        return vp_step, vs_step, dep_step
+        return vp_step, vsv_step, vsh_step, dep_step
 
     @staticmethod
-    def get_interpmodel(model, dep_int, vpvs=1.73, mantle=None):
+    def get_interpmodel(model, ra, dep_int, vs_type=None, vpvs=1.73, mantle=None):
         """
         Return an interpolated stepmodel, for (histogram) plotting.
 
         Model is a vector of the parameters.
         """
         vp_step, vs_step, dep_step = Model.get_stepmodel(model, vpvs, mantle)
+        layers = len(vs_step)
+        
+        if ra is None:
+            vs_step = vs_step
+        elif vs_type == 'vsv':
+            ra = ra[~np.isnan(ra)]
+            ra = np.array(ra)
+            ra =  np.concatenate([(r, r) for r in ra])
+            vsv_step = np.zeros(layers)
+            for i in range(layers):
+                vsv_step[i] = vs_step[i] - 0.5 * ra[i] * 0.01 * vs_step[i]
+            vs_step = vsv_step
+        elif vs_type == 'vsh':
+            ra = np.array(ra)
+            ra =  np.concatenate([(r, r) for r in ra])
+            vsh_step = np.zeros(layers)
+            for i in range(layers):
+                vsh_step[i] = vs_step[i] + 0.5 * ra[i] * 0.01 * vs_step[i]
+            vs_step = vsh_step 
+            
         vs_int = np.interp(dep_int, dep_step, vs_step)
         vp_int = np.interp(dep_int, dep_step, vp_step)
-
+        
         return vp_int, vs_int
 
 
@@ -140,24 +193,25 @@ class ModelMatrix(object):
         return models
 
     @staticmethod
-    def get_interpmodels(models, dep_int):
+    def get_interpmodels(models, ra, dep_int, vs_type=None):
         """Return model matrix with interpolated stepmodels.
 
         Each model in the matrix is parametrized with (vs, z_vnoi)."""
         models = ModelMatrix._delete_nanmodels(models)
-
+        ra = ModelMatrix._delete_nanmodels(ra)
+        
         deps_int = np.repeat([dep_int], len(models), axis=0)
         vss_int = np.empty((len(models), dep_int.size))
-
+        
         for i, model in enumerate(models):
             # for vs, dep 2D histogram
-            _, vs_int = Model.get_interpmodel(model, dep_int)
+            _, vs_int = Model.get_interpmodel(model, ra[i], dep_int, vs_type=vs_type)
             vss_int[i] = vs_int
-
+        
         return vss_int, deps_int
 
     @staticmethod
-    def get_singlemodels(models, dep_int=None, misfits=None):
+    def get_singlemodels(models, ra,  dep_int=None, vs_type=None,misfits=None):
         """Return specific single models from model matrix (vs, depth).
         The model is a step model for plotting.
 
@@ -179,8 +233,10 @@ class ModelMatrix(object):
         if dep_int is None:
             # interpolate depth to 0.5 km bins.
             dep_int = np.linspace(0, 100, 201)
+            
+       
+        vss_int, deps_int = ModelMatrix.get_interpmodels(models, ra,dep_int, vs_type=vs_type)
 
-        vss_int, deps_int = ModelMatrix.get_interpmodels(models, dep_int)
 
         # (1) mean, (2) median
         mean = np.mean(vss_int, axis=0)
@@ -226,7 +282,7 @@ class ModelMatrix(object):
 
     @staticmethod
     def get_weightedvalues(weights, models=None, likes=None, misfits=None,
-                           noiseparams=None, vpvs=None):
+                           noiseparams=None, vpvs=None, ras=None):
         """
         Return weighted matrix of models, misfits and noiseparams, and weighted
         vectors of likelihoods.
@@ -234,7 +290,7 @@ class ModelMatrix(object):
         Basically just repeats values, as given by weights.
         """
         weights = np.array(weights, dtype=int)
-        wlikes, wmisfits, wmodels, wnoise, wvpvs = (None, None, None, None, None)
+        wlikes, wmisfits, wmodels, wnoise, wvpvs, wra = (None, None, None, None, None, None)
 
         if likes is not None:
             wlikes = np.repeat(likes, weights)
@@ -271,4 +327,13 @@ class ModelMatrix(object):
         if vpvs is not None:
             wvpvs = np.repeat(vpvs, weights)
 
-        return wmodels, wlikes, wmisfits, wnoise, wvpvs
+        if ras is not None:
+            wra = np.ones((np.sum(weights), ras[0].size)) * np.nan
+            
+            n = 0
+            for i, ra in enumerate(ras):
+                for rep in range(weights[i]):
+                    wra[n] = ra
+                    n += 1
+
+        return wmodels, wlikes, wmisfits, wnoise, wvpvs, wra

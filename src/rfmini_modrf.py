@@ -8,6 +8,8 @@
 
 import numpy as np
 import rfmini
+import sys
+sys.stdout.flush()
 
 degrees2kilometers = 111.19492664455873
 
@@ -34,7 +36,8 @@ class RFminiModRF(object):
 
         self.keys = {'z': '%.2f',
                      'vp': '%.4f',
-                     'vs': '%.4f',
+                     'vsv': '%.4f',
+                     'vsh': '%.4f',
                      'rho': '%.4f',
                      'qp': '%.1f',
                      'qs': '%.1f',
@@ -63,14 +66,14 @@ class RFminiModRF(object):
         ndata = self.obsx.size
         self.nsamp = 2**int(np.ceil(np.log2(ndata * 2)))
 
-    def write_startmodel(self, h, vp, vs, rho, modfile, **params):
+    def write_startmodel(self, h, vp, vsv, vsh, rho, modfile, **params):
         qp = params.get('qp', np.ones(h.size) * 500)
         qs = params.get('qs', np.ones(h.size) * 225)
 
         z = np.cumsum(h)
         z = np.concatenate(([0], z[:-1]))
 
-        mparams = {'z': z, 'vp': vp, 'vs': vs, 'rho': rho,
+        mparams = {'z': z, 'vp': vp, 'vsv': vsv, 'vsh': vsh,'rho': rho,
                    'qp': qp, 'qs': qs}
         mparams = dict((a, b) for (a, b) in mparams.iteritems()
                        if b is not None)
@@ -80,7 +83,8 @@ class RFminiModRF(object):
         header = []
         mline = []
         data = np.empty((len(pars), mparams[pars[0]].size))
-        for key in ['z', 'vp', 'vs', 'rho', 'qp', 'qs']:
+        for key in ['z', 'vp', 'vsv', 'vsh','rho', 'qp', 'qs']:
+            
             if key in pars:
                 header.append(key)
                 mline.append(self.keys[key])
@@ -144,7 +148,6 @@ class RFminiModRF(object):
         return time[:self.obsx.size], qrfdata[:self.obsx.size]
 
     def run_model(self, h, vp, vs, rho, **params):
-
         assert h.size == vp.size == vs.size == rho.size
 
         h = h.astype(float)

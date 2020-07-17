@@ -13,7 +13,7 @@ from BayHunter import SynthObs
 idx = 3
 h = [5, 23, 8, 0]
 vs = [2.7, 3.6, 3.8, 4.4]
-
+ra = [5,2,3,1]
 vpvs = 1.73
 
 path = 'observed'
@@ -21,7 +21,7 @@ datafile = op.join(path, 'st%d_%s.dat' % (idx, '%s'))
 
 # surface waves
 sw_x = np.linspace(1, 41, 21)
-swdata = SynthObs.return_swddata(h, vs, vpvs=vpvs, x=sw_x)
+swdata = SynthObs.return_swddata(h, vs, ra, vpvs=vpvs, x=sw_x)
 SynthObs.save_data(swdata, outfile=datafile)
 
 # receiver functions
@@ -32,4 +32,4 @@ SynthObs.save_data(rfdata, outfile=datafile)
 
 # velocity-depth model
 modfile = op.join(path, 'st%d_mod.dat' % idx)
-SynthObs.save_model(h, vs, vpvs=vpvs, outfile=modfile)
+SynthObs.save_model(h, vs, ra, vpvs=vpvs, outfile=modfile)

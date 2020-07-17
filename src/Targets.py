@@ -10,6 +10,7 @@ import logging
 import numpy as np
 import matplotlib.pyplot as plt
 
+
 logger = logging.getLogger()
 
 
@@ -53,12 +54,14 @@ class ModeledData(object):
         swd_targets = ['rdispph', 'ldispph', 'rdispgr', 'ldispgr']
 
         if ref in rf_targets:
-            from BayHunter.rfmini_modrf import RFminiModRF
+            #from BayHunter.rfmini_modrf import RFminiModRF
+            from rfmini_modrf import RFminiModRF
             self.plugin = RFminiModRF(obsx, ref)
             self.xlabel = 'Time in s'
 
         elif ref in swd_targets:
-            from BayHunter.surf96_modsw import SurfDisp
+            #from BayHunter.surf96_modsw import SurfDisp
+            from surf96_modsw import SurfDisp
             self.plugin = SurfDisp(obsx, ref)
             self.xlabel = 'Period in s'
 
@@ -78,8 +81,15 @@ class ModeledData(object):
     def calc_synth(self, h, vp, vs, **kwargs):
         """ Call forward modeling method of plugin."""
         rho = kwargs.pop('rho')
-
-        self.x, self.y = self.plugin.run_model(h, vp, vs, rho=rho, **kwargs)
+         
+        #rf_targets = ['prf', 'srf']
+        xlabels = ['Period in s']
+        
+        if self.xlabel in xlabels:
+            ra = kwargs.pop('ra')  
+            self.x, self.y = self.plugin.run_model(h, vp, vs, ra=ra, rho=rho, **kwargs)
+        else:
+            self.x, self.y = self.plugin.run_model(h, vp, vs, rho=rho, **kwargs)
 
 
 class Valuation(object):
@@ -311,7 +321,7 @@ class JointTarget(object):
         jointmisfit = np.sum(misfits)
         return np.concatenate((misfits, [jointmisfit]))
 
-    def evaluate(self, h, vp, vs, noise, **kwargs):
+    def evaluate(self, h, vp, vs, ra, noise, **kwargs):
         """This evaluation method basically evaluates the given model.
         It computes the jointmisfit, and more important the jointlikelihoods.
         The jointlikelihood (here called the proposallikelihood) is the sum
@@ -320,7 +330,7 @@ class JointTarget(object):
 
         logL = 0
         for n, target in enumerate(self.targets):
-            target.moddata.calc_synth(h=h, vp=vp, vs=vs, rho=rho, **kwargs)
+            target.moddata.calc_synth(h=h, vp=vp, vs=vs, ra=ra, rho=rho, **kwargs)
 
             if not target._moddata_valid():
                 self.proposallikelihood = -1e15

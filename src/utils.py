@@ -13,6 +13,8 @@ import os.path as op
 from configobj import ConfigObj
 import matplotlib.pyplot as plt
 from scipy.optimize import least_squares
+import sys
+sys.stdout.flush()
 
 rstate = np.random.RandomState(None)
 

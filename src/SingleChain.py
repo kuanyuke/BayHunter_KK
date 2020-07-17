@@ -11,8 +11,12 @@ import time
 import numpy as np
 import os.path as op
 
-from BayHunter import Model, ModelMatrix
-from BayHunter import utils
+#from BayHunter import Model, ModelMatrix
+#from BayHunter import utils
+
+
+from Models import Model, ModelMatrix
+import utils
 
 import logging
 logger = logging.getLogger()
@@ -22,7 +26,7 @@ class SingleChain(object):
 
     def __init__(self, targets, chainidx=0, initparams={}, modelpriors={},
                  sharedmodels=None, sharedmisfits=None, sharedlikes=None,
-                 sharednoise=None, sharedvpvs=None, random_seed=None):
+                 sharednoise=None, sharedvpvs=None, sharedra=None, random_seed=None):
         self.chainidx = chainidx
         self.rstate = np.random.RandomState(random_seed)
 
@@ -56,7 +60,7 @@ class SingleChain(object):
 
         # chain models
         self._init_chainarrays(sharedmodels, sharedmisfits, sharedlikes,
-                               sharednoise, sharedvpvs)
+                               sharednoise, sharedvpvs, sharedra)
 
         # init model and values
         self._init_model_and_currentvalues()
@@ -67,16 +71,16 @@ class SingleChain(object):
     def _init_model_and_currentvalues(self):
         ivpvs = self.draw_initvpvs()
         self.currentvpvs = ivpvs
+        ira = self.draw_initra()
         imodel = self.draw_initmodel()
         # self.currentmodel = imodel
         inoise, corrfix = self.draw_initnoiseparams()
         # self.currentnoise = inoise
-
         rcond = self.initparams['rcond']
         self.set_target_covariance(corrfix[::2], inoise[::2], rcond)
-
+        
         vp, vs, h = Model.get_vp_vs_h(imodel, ivpvs, self.mantle)
-        self.targets.evaluate(h=h, vp=vp, vs=vs, noise=inoise)
+        self.targets.evaluate(h=h, vp=vp, vs=vs, ra=ira, noise=inoise)
 
         # self.currentmisfits = self.targets.proposalmisfits
         # self.currentlikelihood = self.targets.proposallikelihood
@@ -84,7 +88,7 @@ class SingleChain(object):
         logger.debug((vs, h))
 
         self.n = 0  # accepted models counter
-        self.accept_as_currentmodel(imodel, inoise, ivpvs)
+        self.accept_as_currentmodel(imodel, inoise, ivpvs, ira)
         self.append_currentmodel()
 
     def draw_initmodel(self):
@@ -92,7 +96,6 @@ class SingleChain(object):
         zmin, zmax = self.priors['z']
         vsmin, vsmax = self.priors['vs']
         layers = self.priors['layers'][0] + 1  # half space
-
         vs = self.rstate.uniform(low=vsmin, high=vsmax, size=layers)
         vs.sort()
 
@@ -114,7 +117,6 @@ class SingleChain(object):
 
         z_vnoi.sort()
         model = np.concatenate((vs, z_vnoi))
-
         return(model if self._validmodel(model)
                else self.draw_initmodel())
 
@@ -129,28 +131,41 @@ class SingleChain(object):
             for j, noiseref in enumerate(noiserefs):
                 idx = (2*i)+j
                 noiseprior = self.priors[target.noiseref + noiseref]
-
+                
                 if type(noiseprior) in [int, float, np.float64]:
                     corrfix[idx] = True
                     init_noise[idx] = noiseprior
+                    
                 else:
                     init_noise[idx] = self.rstate.uniform(
                         low=noiseprior[0], high=noiseprior[1])
-
+                    
                 self.noisepriors.append(noiseprior)
-
+        
         self.noiseinds = np.where(corrfix == 0)[0]
         if len(self.noiseinds) == 0:
             logger.warning('All your noise parameters are fixed. On Purpose?')
-
+        
         return init_noise, corrfix
 
     def draw_initvpvs(self):
         if type(self.priors['vpvs']) == np.float:
             return self.priors['vpvs']
-
+        
         vpvsmin, vpvsmax = self.priors['vpvs']
         return self.rstate.uniform(low=vpvsmin, high=vpvsmax)
+    
+    def draw_initra(self):
+        layers = self.priors['layers'][0] + 1  # half space
+        if type(self.priors['ra']) == np.float:
+            init_ra = np.ones(layers) * self.priors['ra']
+            return init_ra
+        elif self.priors['ra'] is None:
+            init_ra = np.ones(layers) * 0
+            return init_ra
+        
+        ramin, ramax = self.priors['ra']        
+        return self.rstate.uniform(low=ramin, high=ramax, size=layers)
 
     def set_target_covariance(self, corrfix, noise_corr, rcond=None):
         # SWD noise hyper-parameters: if corr is not 0, the correlation of data
@@ -201,7 +216,7 @@ exponential law. Explicitly state a noise reference for your user target \
                 target.get_covariance = target.valuation.get_covariance_exp
 
     def _init_chainarrays(self, sharedmodels, sharedmisfits, sharedlikes,
-                          sharednoise, sharedvpvs):
+                          sharednoise, sharedvpvs, sharedra):
         """from shared arrays"""
         ntargets = self.targets.ntargets
         chainidx = self.chainidx
@@ -225,7 +240,9 @@ exponential law. Explicitly state a noise reference for your user target \
             reshape((nchains, nsize))
         vpvs = np.frombuffer(sharedvpvs, dtype=dtype).\
             reshape((nchains, self.nmodels))
-
+        ra = np.frombuffer(sharedra, dtype=dtype).\
+            reshape((nchains, msize/2))
+        
         self.chainmodels = models[chainidx].reshape(
             self.nmodels, self.maxlayers*2)
         self.chainmisfits = misfits[chainidx].reshape(
@@ -234,12 +251,14 @@ exponential law. Explicitly state a noise reference for your user target \
         self.chainnoise = noise[chainidx].reshape(
             self.nmodels, ntargets*2)
         self.chainvpvs = vpvs[chainidx]
+        self.chainra = ra[chainidx].reshape(
+            self.nmodels, self.maxlayers)
         self.chainiter = np.ones(self.chainlikes.size) * np.nan
 
 
 # update current model (change layer number and values)
 
-    def _model_layerbirth(self, model):
+    def _model_layerbirth(self, model, ra):
         """
         Draw a random voronoi nucleus depth from z and assign a new Vs.
 
@@ -247,6 +266,7 @@ exponential law. Explicitly state a noise reference for your user target \
         position (self.propdist[2]).
         """
         n, vs_vnoi, z_vnoi = Model.split_modelparams(model)
+        ra_vnoi = ra 
 
         # new voronoi depth
         zmin, zmax = self.priors['z']
@@ -255,30 +275,39 @@ exponential law. Explicitly state a noise reference for your user target \
         ind = np.argmin((abs(z_vnoi - z_birth)))  # closest z_vnoi
         vs_before = vs_vnoi[ind]
         vs_birth = vs_before + self.rstate.normal(0, self.propdist[2])
+        ra_before =ra_vnoi[ind]
+        if type(self.priors['ra']) == np.float:
+            ra_birth = ra_before
+        else:
+            ra_birth = ra_before + self.rstate.normal(0, self.propdist[5])            
 
         z_new = np.concatenate((z_vnoi, [z_birth]))
         vs_new = np.concatenate((vs_vnoi, [vs_birth]))
+        ra_new = np.concatenate((ra_vnoi, [ra_birth]))
 
         self.dvs2 = np.square(vs_birth - vs_before)
-        return np.concatenate((vs_new, z_new))
+        return np.concatenate((vs_new, z_new)), ra_new
 
-    def _model_layerdeath(self, model):
+    def _model_layerdeath(self, model, ra):
         """
         Remove a random voronoi nucleus depth from model. Delete corresponding
         Vs from model.
         """
         n, vs_vnoi, z_vnoi = Model.split_modelparams(model)
+        ra_vnoi = ra
         ind_death = self.rstate.randint(low=0, high=(z_vnoi.size))
         z_before = z_vnoi[ind_death]
-        vs_before = vs_vnoi[ind_death]
+        vs_before = vs_vnoi[ind_death]    
+        #ra_before = ra_vnoi[ind_death]      
 
         z_new = np.delete(z_vnoi, ind_death)
         vs_new = np.delete(vs_vnoi, ind_death)
+        ra_new = np.delete(ra_vnoi, ind_death)
 
         ind = np.argmin((abs(z_new - z_before)))
         vs_after = vs_new[ind]
         self.dvs2 = np.square(vs_after - vs_before)
-        return np.concatenate((vs_new, z_new))
+        return np.concatenate((vs_new, z_new)), ra_new
 
     def _model_vschange(self, model):
         """Randomly chose a layer to change Vs with Gauss distribution."""
@@ -293,22 +322,47 @@ exponential law. Explicitly state a noise reference for your user target \
         z_mod = self.rstate.normal(0, self.propdist[1])
         model[ind] = model[ind] + z_mod
         return model
+    
+    def _get_ra_proposal(self):
+        ra = copy.copy(self.currentra)
+        ra_mod = self.rstate.normal(0, self.propdist[5])
+        ra = ra + ra_mod
+        return ra
+    
+    def _validra(self, ra):
+        # only works if ra-priors is a range
+        if type(self.priors['ra']) == np.float or self.priors['ra'] is None:
+            return True
+        ramin = self.priors['ra'][0]
+        ramax = self.priors['ra'][1]
+        if np.any(ra < ramin) or np.any(ra > ramax):
+            logger.debug("chain%d: model- ra not in prior"
+                         % self.chainidx)
+            return False
+        
+        return True
 
     def _get_modelproposal(self, modify):
         model = copy.copy(self.currentmodel)
+        ra = copy.copy(self.currentra)
 
         if modify == 'vsmod':
-            propmodel = self._model_vschange(model)
+            propmodel = self._model_vschange(model)            
+            propra = self.currentra
         elif modify == 'zvmod':
             propmodel = self._model_zvnoi_move(model)
+            propra = self.currentra
         elif modify == 'birth':
-            propmodel = self._model_layerbirth(model)
+            propmodel, propra = self._model_layerbirth(model, ra)
         elif modify == 'death':
-            propmodel = self._model_layerdeath(model)
+            propmodel, propra = self._model_layerdeath(model, ra)
+        elif modify == 'ramod':
+            propmodel = model
+            propra = self._get_ra_proposal()
 
-        return self._sort_modelproposal(propmodel)
+        return self._sort_modelproposal(propmodel, propra)
 
-    def _sort_modelproposal(self, model):
+    def _sort_modelproposal(self, model, ra):
         """
         Return the sorted proposal model.
 
@@ -317,11 +371,12 @@ exponential law. Explicitly state a noise reference for your user target \
         """
         n, vs, z_vnoi = Model.split_modelparams(model)
         if np.all(np.diff(z_vnoi) > 0):   # monotone increasing
-            return model
+            return model, ra
         else:
             ind = np.argsort(z_vnoi)
             model_sort = np.concatenate((vs[ind], z_vnoi[ind]))
-        return model_sort
+            ra_sort = ra[ind]
+        return model_sort, ra_sort
 
     def _validmodel(self, model):
         """
@@ -413,9 +468,9 @@ exponential law. Explicitly state a noise reference for your user target \
         if vpvs < self.priors['vpvs'][0] or \
                 vpvs > self.priors['vpvs'][1]:
             return False
+        
         return True
-
-
+    
 # accept / save current models
 
     def adjust_acceptrate(self):
@@ -431,7 +486,7 @@ exponential law. Explicitly state a noise reference for your user target \
             proposed = np.concatenate((self.proposed[:2],
                                       [np.sum(self.proposed[2:4])]))
 
-        elif len(self.modifications) == 5:  # either 'noise' or 'vpvs'
+        elif len(self.modifications) == 5:  #  'noise' or 'vpvs' or 'ra'
             accepted = np.concatenate((self.accepted[:2],
                                       [np.sum(self.accepted[2:4])],
                                       [self.accepted[4]]))
@@ -440,7 +495,7 @@ exponential law. Explicitly state a noise reference for your user target \
                                        [np.sum(self.proposed[2:4])],
                                        [self.proposed[4]]))
 
-        elif len(self.modifications) == 6:  # 'noise' and 'vpvs'
+        elif len(self.modifications) == 6:  #  'noise' and 'vpvs' or 'vpvs' and 'ra' or 'noise' and 'ra'
             accepted = np.concatenate((self.accepted[:2],
                                       [np.sum(self.accepted[2:4])],
                                       self.accepted[4:6]))
@@ -448,18 +503,32 @@ exponential law. Explicitly state a noise reference for your user target \
             proposed = np.concatenate((self.proposed[:2],
                                        [np.sum(self.proposed[2:4])],
                                        self.proposed[4:6]))
+            
+        elif len(self.modifications) == 7:  # 'noise' and 'vpvs' and 'ra'
+            accepted = np.concatenate((self.accepted[:2],
+                                      [np.sum(self.accepted[2:4])],
+                                      self.accepted[4:7]))
+
+            proposed = np.concatenate((self.proposed[:2],
+                                       [np.sum(self.proposed[2:4])],
+                                       self.proposed[4:7]))
+            
 
         acceptrate = accepted / proposed * 100.
 
-        propdistmin = [0.001, 0.001, 0.001, 0.001, 0.001]
+        propdistmin = [0.001, 0.001, 0.001, 0.001, 0.001, 0.001]
 
         for i, rate in enumerate(acceptrate):
             if i < 3:
                 n = i
+            elif i == 3 and 'ra' in self.modifications:
+                n = 5  # ra
             elif i == 3 and 'noise' in self.modifications:
                 n = 3  # noise
+            elif i == 4 and  ('ra' in self.modifications) and ('noise' in self.modifications):
+                n = 3  # noise
             else:
-                n = 4  # vpvs
+                n = 4 # vpvs
 
             if rate < self.acceptance[0]:
                 new = self.propdist[n] * 0.95
@@ -483,7 +552,7 @@ exponential law. Explicitly state a noise reference for your user target \
             2012: 'Transdimensional inversion of receiver functions and
             surface wave dispersion'.
         """
-        if modify in ['vsmod', 'zvmod', 'noise', 'vpvs']:
+        if modify in ['vsmod', 'zvmod', 'noise', 'vpvs', 'ramod']:
             # only velocity or thickness changes are made
             # also used for noise changes
             alpha = self.targets.proposallikelihood - self.currentlikelihood
@@ -508,13 +577,14 @@ exponential law. Explicitly state a noise reference for your user target \
 
         return alpha
 
-    def accept_as_currentmodel(self, model, noise, vpvs):
+    def accept_as_currentmodel(self, model, noise, vpvs, ra):
         """Assign currentmodel and currentvalues to self."""
         self.currentmisfits = self.targets.proposalmisfits
         self.currentlikelihood = self.targets.proposallikelihood
         self.currentmodel = model
         self.currentnoise = noise
         self.currentvpvs = vpvs
+        self.currentra = ra
         self.lastmoditer = self.iiter
 
     def append_currentmodel(self):
@@ -524,7 +594,8 @@ exponential law. Explicitly state a noise reference for your user target \
         self.chainlikes[self.n] = self.currentlikelihood
         self.chainnoise[self.n, :] = self.currentnoise
         self.chainvpvs[self.n] = self.currentvpvs
-
+        self.chainra[self.n, :self.currentra.size] = self.currentra
+        
         self.chainiter[self.n] = self.iiter
         self.n += 1
 
@@ -532,23 +603,26 @@ exponential law. Explicitly state a noise reference for your user target \
 
     def iterate(self):
         if self.iiter < (-self.iter_phase1 + (self.iterations * 0.01)):
-            # only allow vs and z modifications the first 1 % of iterations
+            # only allow vs and z modifications the first 1 % of iterations 
             modify = self.rstate.choice(['vsmod', 'zvmod'] + self.noisemods +
                                         self.vpvsmods)
         else:
             modify = self.rstate.choice(self.modifications)
-
+            
         if modify in self.modelmods:
-            proposalmodel = self._get_modelproposal(modify)
+            proposalmodel, proposalra = self._get_modelproposal(modify)
             proposalnoise = self.currentnoise
             proposalvpvs = self.currentvpvs
             if not self._validmodel(proposalmodel):
+                proposalmodel = None            
+            if not self._validra(proposalra):
                 proposalmodel = None
 
         elif modify in self.noisemods:
             proposalmodel = self.currentmodel
             proposalnoise = self._get_hyperparameter_proposal()
             proposalvpvs = self.currentvpvs
+            proposalra = self.currentra
             if not self._validnoise(proposalnoise):
                 proposalmodel = None
 
@@ -556,9 +630,10 @@ exponential law. Explicitly state a noise reference for your user target \
             proposalmodel = self.currentmodel
             proposalnoise = self.currentnoise
             proposalvpvs = self._get_vpvs_proposal()
+            proposalra = self.currentra
             if not self._validvpvs(proposalvpvs):
                 proposalmodel = None
-
+                
         if proposalmodel is None:
             # If not a valid proposal model and noise params are found,
             # leave self.iterate and try with another modification
@@ -569,7 +644,7 @@ exponential law. Explicitly state a noise reference for your user target \
 
         # compute synthetic data and likelihood, misfit
         vp, vs, h = Model.get_vp_vs_h(proposalmodel, proposalvpvs, self.mantle)
-        self.targets.evaluate(h=h, vp=vp, vs=vs, noise=proposalnoise)
+        self.targets.evaluate(h=h, vp=vp, vs=vs, ra=proposalra, noise=proposalnoise)
 
         aidx = self.modifications.index(modify)
         self.proposed[aidx] += 1
@@ -585,7 +660,7 @@ exponential law. Explicitly state a noise reference for your user target \
         # #### _____________________________________________________________
         if u < alpha:
             # always the case if self.jointlike > self.bestlike (alpha>1)
-            self.accept_as_currentmodel(proposalmodel, proposalnoise, proposalvpvs)
+            self.accept_as_currentmodel(proposalmodel, proposalnoise, proposalvpvs, proposalra)
             self.append_currentmodel()
             self.accepted[aidx] += 1
 
@@ -616,7 +691,9 @@ exponential law. Explicitly state a noise reference for your user target \
         self.tnull = time.time()
         self.iiter = -self.iter_phase1
 
-        self.modelmods = ['vsmod', 'zvmod', 'birth', 'death']
+        
+        self.modelmods = ['vsmod', 'zvmod', 'birth', 'death'] if type(self.priors['ra']) == np.float \
+            or self.priors['ra'] is None else ['vsmod', 'zvmod', 'birth', 'death', 'ramod']
         self.noisemods = [] if len(self.noiseinds) == 0 else ['noise']
         self.vpvsmods = [] if type(self.priors['vpvs']) == np.float else ['vpvs']
         self.modifications = self.modelmods + self.noisemods + self.vpvsmods
@@ -635,6 +712,7 @@ exponential law. Explicitly state a noise reference for your user target \
         self.chainlikes = self.chainlikes[:self.n]
         self.chainnoise = self.chainnoise[:self.n, :]
         self.chainvpvs = self.chainvpvs[:self.n]
+        self.chainra = self.chainra[:self.n, :]
         self.chainiter = self.chainiter[:self.n]
 
         # only consider models after burnin phase
@@ -642,22 +720,24 @@ exponential law. Explicitly state a noise reference for your user target \
         p2ind = np.where(self.chainiter >= 0)[0]
 
         if p1ind.size != 0:
-            wmodels, wlikes, wmisfits, wnoise, wvpvs = self.get_weightedvalues(
+            wmodels, wlikes, wmisfits, wnoise, wvpvs, wra = self.get_weightedvalues(
                 pind=p1ind, finaliter=0)
             self.p1models = wmodels  # p1 = phase one
             self.p1misfits = wmisfits
             self.p1likes = wlikes
             self.p1noise = wnoise
             self.p1vpvs = wvpvs
+            self.p1ra = wra
 
         if p2ind.size != 0:
-            wmodels, wlikes, wmisfits, wnoise, wvpvs = self.get_weightedvalues(
+            wmodels, wlikes, wmisfits, wnoise, wvpvs, wra = self.get_weightedvalues(
                 pind=p2ind, finaliter=self.iiter)
             self.p2models = wmodels  # p2 = phase two
             self.p2misfits = wmisfits
             self.p2likes = wlikes
             self.p2noise = wnoise
             self.p2vpvs = wvpvs
+            self.p2ra = wra
 
         accmodels = float(self.p2likes.size)  # accepted models in p2 phase
         maxmodels = float(self.initparams['maxmodels'])  # for saving
@@ -678,23 +758,24 @@ exponential law. Explicitly state a noise reference for your user target \
         plikes = self.chainlikes[pind]
         pnoise = self.chainnoise[pind]
         pvpvs = self.chainvpvs[pind]
+        pras = self.chainra[pind]
         pweights = np.diff(np.concatenate((self.chainiter[pind], [finaliter])))
-
-        wmodels, wlikes, wmisfits, wnoise, wvpvs = ModelMatrix.get_weightedvalues(
+        
+        wmodels, wlikes, wmisfits, wnoise, wvpvs, wra = ModelMatrix.get_weightedvalues(
             pweights, models=pmodels, likes=plikes, misfits=pmisfits,
-            noiseparams=pnoise, vpvs=pvpvs)
-        return wmodels, wlikes, wmisfits, wnoise, wvpvs
+            noiseparams=pnoise, vpvs=pvpvs, ras=pras)
+        return wmodels, wlikes, wmisfits, wnoise, wvpvs, wra
 
     def save_finalmodels(self):
         """Save chainmodels as pkl file"""
         savepath = op.join(self.initparams['savepath'], 'data')
-        names = ['models', 'likes', 'misfits', 'noise', 'vpvs']
+        names = ['models', 'likes', 'misfits', 'noise', 'vpvs', 'ra']
 
         # phase 1 -- burnin
         try:
             for i, data in enumerate([self.p1models, self.p1likes,
                                      self.p1misfits, self.p1noise,
-                                     self.p1vpvs]):
+                                     self.p1vpvs, self.p1ra]):
                 outfile = op.join(savepath, 'c%.3d_p1%s' % (self.chainidx, names[i]))
                 np.save(outfile, data[::self.thinning])
         except:
@@ -704,7 +785,7 @@ exponential law. Explicitly state a noise reference for your user target \
         try:
             for i, data in enumerate([self.p2models, self.p2likes,
                                      self.p2misfits, self.p2noise,
-                                     self.p2vpvs]):
+                                     self.p2vpvs, self.p2ra]):
                 outfile = op.join(savepath, 'c%.3d_p2%s' % (self.chainidx, names[i]))
                 np.save(outfile, data[::self.thinning])
 

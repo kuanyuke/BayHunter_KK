@@ -20,10 +20,15 @@ import matplotlib.cm as cm
 from collections import OrderedDict
 import cPickle
 
-from BayHunter.utils import SerializingContext
-from BayHunter import Model, ModelMatrix
-from BayHunter import SingleChain
-from BayHunter import utils
+#from BayHunter.utils import SerializingContext
+#from BayHunter import Model, ModelMatrix
+#from BayHunter import SingleChain
+#from BayHunter import utils
+
+from utils import SerializingContext
+from Models import Model, ModelMatrix
+from SingleChain import SingleChain
+import utils
 
 import logging
 logger = logging.getLogger()
@@ -124,6 +129,19 @@ class MCMC_Optimizer(object):
         vpvsdata = np.frombuffer(self.sharedvpvs, dtype=dtype)
         vpvsdata.fill(np.nan)
         memory += vpvsdata.nbytes
+        
+        # ra
+        self.sharedra = sharedctypes.RawArray(
+            'f',  self.nchains * (self.nmodels * self.maxlayers))
+        radata = np.frombuffer(self.sharedra, dtype=dtype)
+        radata.fill(np.nan)
+        memory += radata.nbytes
+        
+        self.sharedmodels = sharedctypes.RawArray(
+            'f', self.nchains * (self.nmodels * self.maxlayers * 2))
+        modeldata = np.frombuffer(self.sharedmodels, dtype=dtype)
+        modeldata.fill(np.nan)
+        memory += modeldata.nbytes
 
         memory = np.ceil(memory / 1e6)
         logger.info('... they occupy ~%d MB memory.' % memory)
@@ -134,7 +152,7 @@ class MCMC_Optimizer(object):
             initparams=self.initparams, sharedmodels=self.sharedmodels,
             sharedmisfits=self.sharedmisfits, sharedlikes=self.sharedlikes,
             sharednoise=self.sharednoise, sharedvpvs=self.sharedvpvs,
-            random_seed=self.rstate.randint(1000))
+            sharedra=self.sharedra, random_seed=self.rstate.randint(1000))
 
         return chain
 
@@ -156,6 +174,9 @@ class MCMC_Optimizer(object):
             .reshape((self.nchains, self.nmodels, self.ntargets*2))
         vpvs = np.frombuffer(self.sharedvpvs, dtype=dtype) \
             .reshape((self.nchains, self.nmodels))
+        ra = np.frombuffer(self.sharedra, dtype=dtype) \
+            .reshape((self.nchains, self.nmodels, self.maxlayers))
+        
 
         def get_latest_row(models):
             nan_mask = ~np.isnan(models[:, :, 0])
@@ -184,17 +205,27 @@ class MCMC_Optimizer(object):
             latest_vpvs = [vpvs[ic, vpvs_mask[ic]]
                            for ic in range(self.nchains)]
             return np.vstack(latest_vpvs)
-
+        
+        def get_latest_ra(ra):
+            nan_mask = ~np.isnan(models[:, :, 0])
+            ra_mask = np.argmax(np.cumsum(nan_mask, axis=1), axis=1)
+            latest_ra = [ra[ic, ra_mask[ic]]
+                           for ic in range(self.nchains)]
+            return np.vstack(latest_ra)
+        
+        
+        
         while True:
             logger.debug('Sending array...')
             latest_models = get_latest_row(models)
             latest_likes = get_latest_likes(likes)
             latest_noise = get_latest_noise(noise)
             latest_vpvs = get_latest_vpvs(vpvs)
-
+            latest_ra = get_latest_ra(ra)
+            
             latest_vpvs_models = \
-                np.concatenate((latest_vpvs, latest_models), axis=1)
-
+                np.concatenate((latest_vpvs, latest_ra, latest_models), axis=1)
+            
             self.socket.send_array(latest_vpvs_models)
             self.socket.send_array(latest_likes)
             self.socket.send_array(latest_noise)

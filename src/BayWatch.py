@@ -19,9 +19,13 @@ from matplotlib.widgets import Button
 from matplotlib.collections import LineCollection
 from mpl_toolkits.axes_grid.inset_locator import inset_axes
 
-from BayHunter.utils import SerializingContext
-from BayHunter import Model
-from BayHunter import utils
+#from BayHunter.utils import SerializingContext
+#from BayHunter import Model
+#from BayHunter import utils
+from utils import SerializingContext
+from Models import Model
+import utils
+
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('BayWatch')
@@ -55,6 +59,7 @@ class BayWatcher(object):
         self.modellength = int(self.priors['layers'][1] + 1) * 2
         self.vs_step = np.ones((capacity, self.modellength)) * np.nan
         self.dep_step = np.ones((capacity, self.modellength)) * np.nan
+        self.ra_step = np.ones((capacity, self.modellength/2)) * np.nan
         self.likes = np.ones((capacity)) * np.nan
         self.vpvss = np.ones((capacity)) * np.nan
         self.modelmatrix = np.ones((capacity, self. modellength)) * np.nan
@@ -242,12 +247,13 @@ class BayWatcher(object):
 
 
         # reference model
-        dep, vs = self.refmodel.get('model', ([np.nan], [np.nan]))
+        dep, vsv, vsh = self.refmodel.get('model', ([np.nan], [np.nan], [np.nan]))
         noise = self.refmodel.get('noise', [np.nan, np.nan])[1::2]
         explike = self.refmodel.get('explike', np.nan)
         vpvs = self.refmodel.get('vpvs', np.nan)
 
-        self.axes[0].plot(vs, dep, color='k', ls=':')
+        self.axes[0].plot(vsv, dep, color='k', ls=':')
+        self.axes[0].plot(vsh, dep, color='k', ls=':')
         self.axes[5].axvline(vpvs, color='k', ls=':')
         self.axes[3].axhline(explike, color='darkblue', ls=':')
 
@@ -332,7 +338,7 @@ class BayWatcher(object):
         print 'New chain index:', self.chainidx
 
         # if new chain is chosen
-        self.modelmatrix, self.likes, self.noises, self.vpvss = self.chainarrays[self.chainidx]
+        self.modelmatrix, self.likes, self.noises, self.vpvss, self.ras= self.chainarrays[self.chainidx]
         nantmp = np.ones(self.modellength) * np.nan
 
         # reset vs and dep matrix to nan
@@ -344,7 +350,19 @@ class BayWatcher(object):
             if ~np.isnan(model[0]):
                 vp, vs, dep = Model.get_stepmodel(model, vpvs=self.vpvss[i], mantle=self.mantle)
                 dep[-1] = self.priors['z'][-1] * 1.5
-
+                
+                ra = np.array(self.ras[i])
+                ra = np.concatenate([(r, r) for r in ra])
+        
+                for target in self.targets:
+                     
+                    if target.ref == 'rdispph' or target.ref == 'rdispgr':
+                        vs = Model.get_vsv_vsh(vs, ra, vs_type='vsv')
+                    elif target.ref == 'ldispph' or target.ref == 'ldispgr':
+                        vs = Model.get_vsv_vsh(vs, ra, vs_type='vsh')
+                    else:
+                        vs =vs
+                
                 self.vs_step = np.roll(self.vs_step, -1, axis=0)  # rolling up models
                 vs = nantmp[:vs.size] = vs
                 self.vs_step[-1][:vs.size] = vs
@@ -361,7 +379,8 @@ class BayWatcher(object):
 
         # immediately update data fit lines
         vp, vs, h = Model.get_vp_vs_h(lastmodel, vpvs=lastvpvs, mantle=self.mantle)
-        ymod = self.compute_synth(h, vs, vp)
+        ra = ra[~np.isnan(ra)]
+        ymod = self.compute_synth(h, vs, vp, ra)
 
         for i, tline in enumerate(self.targetlines):
             if tline is not None:
@@ -391,19 +410,23 @@ class BayWatcher(object):
                                np.nanmax(self.noises.T[1::2])*1.02])
         self.fig.canvas.draw_idle()
 
-    def compute_synth(self, h, vs, vp):
+    def compute_synth(self, h, vs, vp, ra):
         h = np.array(h)
         vs = np.array(vs)
-
+        
         # compute vp from vs and rho from vp
         rho = vp * 0.32 + 0.77
-
+        
         moddata = []
         # compute the synthetic data
         for target in self.targets:
             if target is None:
                 moddata.append(np.nan)
                 continue
+            elif target.noiseref == 'swd':
+                _, ymod = target.moddata.plugin.run_model(
+                    h=h, vp=vp, vs=vs, ra=ra, rho=rho)
+                moddata.append(ymod)
             else:
                 _, ymod = target.moddata.plugin.run_model(
                     h=h, vp=vp, vs=vs, rho=rho)
@@ -416,18 +439,19 @@ class BayWatcher(object):
         likes = np.ones((self.capacity)) * np.nan
         noises = np.ones((self.capacity, self.ntargets*2)) * np.nan
         vpvss = np.ones((self.capacity)) * np.nan
+        ras = np.ones((self.capacity, self.modellength/2)) * np.nan
 
         self.chainarrays = []
         for chain in np.arange(self.nchains):
-            self.chainarrays.append((models, likes, noises, vpvss))
+            self.chainarrays.append((models, likes, noises, vpvss, ras))
         self.arrays = False
 
-    def store_data(self, arrmodels=None, arrlikes=None, arrnoise=None, arrvpvs=None):
+    def store_data(self, arrmodels=None, arrlikes=None, arrnoise=None, arrvpvs=None, arrra=None):
         """Take input array and append to list data"""
-
+        
         for idx, chain in enumerate(self.chainarrays):
             # print idx
-            models, likes, noises, vpvss = chain
+            models, likes, noises, vpvss, ras = chain
 
             # if all the incoming values are identical, BayWatch stops updating
             # the specific chain. If no chain get delivered an update,
@@ -436,18 +460,20 @@ class BayWatcher(object):
             if (np.nansum(models[-1] - models[-2]) == 0 and
                 np.nansum(likes[-1] - likes[-2]) == 0 and
                     np.nansum(noises[-1] - noises[-2]) == 0 and
-                    np.nansum(vpvss[-1] - vpvss[-2]) == 0):
+                    np.nansum(vpvss[-1] - vpvss[-2]) == 0 and
+                    np.nansum(ras[-1] - ras[-2]) == 0 ):
 
                 # ignore initiation phase when nan placeholds of arrays.
                 if (~np.isnan(models[-2][0]) and
                     ~np.isnan(noises[-2][0]) and
                     ~np.isnan(likes[-2]) and
-                    ~np.isnan(vpvss[-2])):
+                    ~np.isnan(vpvss[-2]) and
+                    ~np.isnan(ras[-2][0]) ):
 
                     self.breakloop[idx] = 1
                     continue
 
-            if arrmodels is not None and arrvpvs is not None:
+            if arrmodels is not None and arrvpvs is not None and arrra is not None:
                 vpvs = float(arrvpvs[idx])
                 # print vpvs
 
@@ -462,9 +488,13 @@ class BayWatcher(object):
 
                 models = np.roll(models, -1, axis=0)  # rolling up models
                 models[-1][:model.size] = model
-
+                
+                ra = arrra[idx]
+                ras = np.roll(ras, -1, axis=0) 
+                ras[-1][:ra.size] = ra
+                
                 if idx == self.chainidx:
-                    self.update_models(model, vpvs)  # plot
+                    self.update_models(model, vpvs, ra)  # plot
 
             if arrlikes is not None:
                 like = float(arrlikes[idx])
@@ -484,33 +514,46 @@ class BayWatcher(object):
                 if idx == self.chainidx:
                     self.update_noises(noise)  # plot
 
-            self.chainarrays[idx] = (models, likes, noises, vpvss)
+            self.chainarrays[idx] = (models, likes, noises, vpvss, ras)
 
-    def update_models(self, model, vpvs):
+    def update_models(self, model, vpvs, ra):
         logger.debug('### Found new chain model')
         vp, vs, dep = Model.get_stepmodel(model, vpvs=vpvs, mantle=self.mantle)
-
+              
+        ra = np.array(ra)
+        ra = np.concatenate([(r, r) for r in ra])
+        
+        for target in self.targets:
+            if target.ref == 'rdispph' or target.ref == 'rdispgr':
+                vs = Model.get_vsv_vsh(vs, ra, vs_type='vsv')
+            elif target.ref == 'ldispph' or target.ref == 'ldispgr':
+                vs = Model.get_vsv_vsh(vs, ra, vs_type='vsh')
+            else:
+                vs =vs
+            
         self.vs_step = np.roll(self.vs_step, -1, axis=0)  # rolling up models
         nantmp = np.ones(self.modellength) * np.nan
         nantmp[:vs.size] = vs
         self.vs_step[-1] = nantmp
-
+        
         self.dep_step = np.roll(self.dep_step, -1, axis=0)  # rolling up models
         nantmp = np.ones(self.modellength) * np.nan
         nantmp[:dep.size] = dep
         self.dep_step[-1] = nantmp
-
+        
         vp, vs, h = Model.get_vp_vs_h(model, vpvs=vpvs, mantle=self.mantle)
-        ymod = self.compute_synth(h, vs, vp)
+        ra = ra[~np.isnan(ra)]
+        ymods = self.compute_synth(h, vs, vp, ra)
 
         for i, tline in enumerate(self.targetlines):
             if tline is not None:
-                tline.set_ydata(ymod[i])
+                tline.set_ydata(ymods[i])
 
         # # create LineCollection
         segments = [np.column_stack([x, y])
                     for x, y in zip(self.vs_step, self.dep_step)]
-        self.modelcollection.set_segments(segments)
+        self.modelcollection.set_segments(segments)       
+        
         a = np.repeat(([0, 1], ), self.capacity, axis=0)
         b = np.array([[v]*2 for v in self.vpvss])
         segments = [np.column_stack([x, y]) for x, y in zip(b, a)]
@@ -552,7 +595,7 @@ class BayWatcher(object):
 
         while True:
             arr = self.socket.recv_array()
-
+            
             if self.arrays:
                 self.nchains = len(arr)
                 self.init_arrays()
@@ -562,13 +605,16 @@ class BayWatcher(object):
                 logger.debug('Received likelihood array')
                 self.store_data(arrlikes=arr)
 
-            elif (arr.shape[1] - 1) == self.modellength:
+            elif (arr.shape[1] - 1) == 1.5 * (self.modellength):
                 logger.debug('Received vpvs/model array: shape, %s' % str(arr.shape))
-                self.store_data(arrmodels=arr[:, 1:], arrvpvs=arr[:, 0])
+                layer= int((0.5*self.modellength)+1)
+                self.store_data(arrmodels=arr[:,layer:], arrvpvs=arr[:, 0], arrra=arr[:, 1: layer])
 
             elif arr.shape[1] % 2 == 0:
                 logger.debug('Received noise array: shape, %s' % str(arr.shape))
                 self.store_data(arrnoise=arr)
+                
+               
 
             self.bnext.on_clicked(self.next)
             self.bprev.on_clicked(self.prev)
